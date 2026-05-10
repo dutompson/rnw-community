@@ -27,13 +27,34 @@ jest.mock('../native-payments/native-payments', () => ({
         canMakePayments: jest.fn(),
         show: jest.fn(),
         abort: jest.fn(),
+        updatePaymentItems: jest.fn(async () => undefined),
+        updateShippingContact: jest.fn(async () => undefined),
+        updateShippingMethod: jest.fn(async () => undefined),
+        updateCouponCode: jest.fn(async () => undefined),
     },
 }));
+
+type EventName = 'onShippingContactChange' | 'onShippingMethodChange' | 'onCouponCodeChange' | 'onPaymentMethodChange';
+
+const listenerMap: Partial<Record<EventName, (event: unknown) => void>> = {};
+const removeMocks: Array<jest.Mock> = [];
 
 jest.mock('react-native', () => ({
     Platform: {
         OS: 'android',
     },
+    NativeModules: {
+        Payments: {},
+    },
+    NativeEventEmitter: jest.fn().mockImplementation(() => ({
+        addListener: jest.fn((eventName: EventName, callback: (event: unknown) => void) => {
+            listenerMap[eventName] = callback;
+            const remove = jest.fn();
+            removeMocks.push(remove);
+
+            return { remove };
+        }),
+    })),
 }));
 
  
@@ -48,6 +69,11 @@ describe('PaymentRequest', () => {
      
     beforeEach(() => {
         jest.clearAllMocks();
+        removeMocks.length = 0;
+        for (const key of Object.keys(listenerMap)) {
+            // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+            delete listenerMap[key as EventName];
+        }
     });
 
      
@@ -481,6 +507,25 @@ describe('PaymentRequest', () => {
                 new DOMException(PaymentsErrorEnum.NotSupportedError)
             );
         });
+
+        it('should not register native listeners for Apple Pay change handlers on Android', () => {
+            expect.assertions(1);
+
+            const request = new PaymentRequest([androidMethodData], paymentDetails);
+
+            request.onPaymentMethodChange(() => paymentDetails as unknown as PaymentDetailsInit);
+            request.onShippingContactChange(() => ({
+                details: paymentDetails as unknown as PaymentDetailsInit,
+            }));
+            request.onShippingMethodChange(() => ({
+                details: paymentDetails as unknown as PaymentDetailsInit,
+            }));
+            request.onCouponCodeChange(() => ({
+                details: paymentDetails as unknown as PaymentDetailsInit,
+            }));
+
+            expect(Object.keys(listenerMap)).toHaveLength(0);
+        });
     });
 
      
@@ -503,6 +548,216 @@ describe('PaymentRequest', () => {
          
         beforeEach(() => {
             Platform.OS = 'ios';
+        });
+
+        it('should register and handle onPaymentMethodChange', () => {
+            expect.assertions(3);
+
+            const request = new PaymentRequest([iosMethodData], paymentDetails);
+
+            const updatedDetails = {
+                ...paymentDetails,
+                displayItems: [{ label: 'Updated', amount: { currency: 'USD', value: '11.00' } }],
+            } as unknown as PaymentDetailsInit;
+
+            request.onPaymentMethodChange(() => updatedDetails);
+
+            expect(listenerMap.onPaymentMethodChange).toBeDefined();
+            listenerMap.onPaymentMethodChange?.({ type: 'debit', network: 'visa', displayName: 'Visa' });
+
+            expect(NativePayments.updatePaymentItems).toHaveBeenCalledWith(updatedDetails);
+            expect(request.details).toBe(updatedDetails);
+        });
+
+        it('should register and handle onShippingContactChange', () => {
+            expect.assertions(3);
+
+            const request = new PaymentRequest([iosMethodData], paymentDetails);
+
+            const updatedDetails = {
+                ...paymentDetails,
+                displayItems: [{ label: 'Item', amount: { currency: 'USD', value: '1.00' } }],
+            } as unknown as PaymentDetailsInit;
+
+            request.onShippingContactChange(() => ({
+                details: updatedDetails,
+                shippingMethods: [{ identifier: 'standard', detail: 'Standard' }],
+                errors: [{ code: 'invalid', message: 'Invalid address' }],
+            }));
+
+            expect(listenerMap.onShippingContactChange).toBeDefined();
+            listenerMap.onShippingContactChange?.({
+                emailAddress: 'test@example.com',
+                name: {
+                    givenName: 'John',
+                    familyName: 'Doe',
+                    middleName: '',
+                    namePrefix: '',
+                    nameSuffix: '',
+                    nickname: '',
+                },
+                phoneNumber: { stringValue: '+1' },
+                postalAddress: {
+                    street: '1',
+                    city: 'C',
+                    state: 'S',
+                    postalCode: 'P',
+                    country: 'US',
+                    ISOCountryCode: 'US',
+                    subAdministrativeArea: '',
+                    subLocality: '',
+                },
+            });
+
+            expect(NativePayments.updateShippingContact).toHaveBeenCalledWith(
+                updatedDetails,
+                [{ identifier: 'standard', detail: 'Standard' }],
+                [{ code: 'invalid', message: 'Invalid address' }]
+            );
+            expect(request.details).toBe(updatedDetails);
+        });
+
+        it('should register and handle onShippingMethodChange', () => {
+            expect.assertions(3);
+
+            const request = new PaymentRequest([iosMethodData], paymentDetails);
+
+            const updatedDetails = {
+                ...paymentDetails,
+                displayItems: [{ label: 'Ship', amount: { currency: 'USD', value: '2.00' } }],
+            } as unknown as PaymentDetailsInit;
+
+            request.onShippingMethodChange(() => ({
+                details: updatedDetails,
+            }));
+
+            expect(listenerMap.onShippingMethodChange).toBeDefined();
+            listenerMap.onShippingMethodChange?.({ identifier: 'express', detail: 'Express' });
+
+            expect(NativePayments.updateShippingMethod).toHaveBeenCalledWith(updatedDetails);
+            expect(request.details).toBe(updatedDetails);
+        });
+
+        it('should register and handle onCouponCodeChange', () => {
+            expect.assertions(3);
+
+            const request = new PaymentRequest([iosMethodData], paymentDetails);
+
+            const updatedDetails = {
+                ...paymentDetails,
+                displayItems: [{ label: 'Discount', amount: { currency: 'USD', value: '-1.00' } }],
+            } as unknown as PaymentDetailsInit;
+
+            request.onCouponCodeChange(() => ({
+                details: updatedDetails,
+                shippingMethods: [{ identifier: 'standard', detail: 'Standard' }],
+                errors: [],
+            }));
+
+            expect(listenerMap.onCouponCodeChange).toBeDefined();
+            listenerMap.onCouponCodeChange?.({ couponCode: 'SAVE10' });
+
+            expect(NativePayments.updateCouponCode).toHaveBeenCalledWith(
+                updatedDetails,
+                [{ identifier: 'standard', detail: 'Standard' }],
+                []
+            );
+            expect(request.details).toBe(updatedDetails);
+        });
+
+        it('should cleanup listeners when show resolves', async () => {
+            expect.assertions(2);
+
+            const request = new PaymentRequest([iosMethodData], paymentDetails);
+            request.onShippingMethodChange(() => ({ details: paymentDetails as unknown as PaymentDetailsInit }));
+
+            jest.mocked(NativePayments.show).mockResolvedValue(
+                JSON.stringify({
+                    token: {
+                        paymentData: '{}',
+                        paymentMethod: {
+                            displayName: 'Visa',
+                            network: 'Visa',
+                            type: IosPKPaymentMethodType.PKPaymentMethodTypeDebit,
+                        },
+                        transactionIdentifier: 'txn',
+                    },
+                } as unknown as IosPKPayment)
+            );
+
+            await request.show();
+
+            expect(removeMocks.length).toBe(1);
+            expect(removeMocks[0]).toHaveBeenCalled();
+        });
+
+        it('should ignore stale change listener invocations after show resolves', async () => {
+            expect.assertions(4);
+
+            const request = new PaymentRequest([iosMethodData], paymentDetails);
+
+            request.onPaymentMethodChange(() => paymentDetails as unknown as PaymentDetailsInit);
+            request.onShippingContactChange(() => ({
+                details: paymentDetails as unknown as PaymentDetailsInit,
+            }));
+            request.onShippingMethodChange(() => ({
+                details: paymentDetails as unknown as PaymentDetailsInit,
+            }));
+            request.onCouponCodeChange(() => ({
+                details: paymentDetails as unknown as PaymentDetailsInit,
+            }));
+
+            jest.mocked(NativePayments.show).mockResolvedValue(
+                JSON.stringify({
+                    token: {
+                        paymentData: '{}',
+                        paymentMethod: {
+                            displayName: 'Visa',
+                            network: 'Visa',
+                            type: IosPKPaymentMethodType.PKPaymentMethodTypeDebit,
+                        },
+                        transactionIdentifier: 'txn',
+                    },
+                } as unknown as IosPKPayment)
+            );
+
+            await request.show();
+
+            jest.mocked(NativePayments.updatePaymentItems).mockClear();
+            jest.mocked(NativePayments.updateShippingContact).mockClear();
+            jest.mocked(NativePayments.updateShippingMethod).mockClear();
+            jest.mocked(NativePayments.updateCouponCode).mockClear();
+
+            listenerMap.onPaymentMethodChange?.({ type: 'debit', network: 'visa', displayName: 'Visa' });
+            listenerMap.onShippingContactChange?.({
+                emailAddress: '',
+                name: {
+                    givenName: '',
+                    familyName: '',
+                    middleName: '',
+                    namePrefix: '',
+                    nameSuffix: '',
+                    nickname: '',
+                },
+                phoneNumber: { stringValue: '' },
+                postalAddress: {
+                    street: '',
+                    city: '',
+                    state: '',
+                    postalCode: '',
+                    country: '',
+                    ISOCountryCode: '',
+                    subAdministrativeArea: '',
+                    subLocality: '',
+                },
+            });
+            listenerMap.onShippingMethodChange?.({ identifier: 'x', detail: 'y' });
+            listenerMap.onCouponCodeChange?.({ couponCode: '' });
+
+            expect(NativePayments.updatePaymentItems).not.toHaveBeenCalled();
+            expect(NativePayments.updateShippingContact).not.toHaveBeenCalled();
+            expect(NativePayments.updateShippingMethod).not.toHaveBeenCalled();
+            expect(NativePayments.updateCouponCode).not.toHaveBeenCalled();
         });
 
         it('should initialize with the correct id', () => {

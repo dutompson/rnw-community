@@ -18,8 +18,14 @@ export { AndroidPaymentResponse } from './class/payment-response/android-payment
 
 export type { IosPaymentMethodDataDataInterface } from './@standard/ios/mapping/ios-payment-method-data-data.interface';
 export type { IosPaymentMethodDataInterface } from './@standard/ios/mapping/ios-payment-method-data.interface';
+export type { IosPKContact } from './@standard/ios/response/ios-pk-contact';
+export type { IosPKShippingMethod } from './@standard/ios/response/ios-pk-shipping-method';
 export type { IosPKToken } from './@standard/ios/response/ios-pk-token';
 export { IosPaymentResponse } from './class/payment-response/ios-payment-response';
 
 export { PaymentRequest } from './class/payment-request/payment-request';
+export type { PaymentMethodChangeEvent } from './class/payment-request/payment-request';
+export type { CouponCodeChangeEvent } from './class/payment-request/payment-request';
+export type { PaymentRequestUpdateError } from './type/payment-request-update-error/payment-request-update-error.type';
+export type { PaymentRequestUpdateResult } from './type/payment-request-update-result/payment-request-update-result.type';
 export { PaymentResponse } from './class/payment-response/payment-response';

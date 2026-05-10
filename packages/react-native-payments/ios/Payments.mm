@@ -2,7 +2,19 @@
 
 #import <React/RCTLog.h>
 #import <Foundation/Foundation.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
+
+static id RNPayments_PKPaymentNetworkFromClassMethod(Class cls, NSString *methodName)
+{
+    if (cls == nil || methodName.length == 0) {
+        return nil;
+    }
+    SEL sel = NSSelectorFromString(methodName);
+    typedef id (*MsgSend)(Class, SEL);
+    MsgSend msgSend = (MsgSend)objc_msgSend;
+    return msgSend(cls, sel);
+}
 
 // TODO: Add logs
 @implementation Payments
@@ -17,6 +29,20 @@ static const PKPaymentNetwork PKPaymentNetworkUnknown = 0;
 {
     return dispatch_get_main_queue();
 }
+
+// RCTEventEmitter required methods
+- (NSArray<NSString *> *)supportedEvents
+{
+    return @[
+        @"onCouponCodeChange",
+        @"onPaymentMethodChange",
+        @"onShippingContactChange",
+        @"onShippingMethodChange"
+    ];
+}
+
+- (void)startObserving { }
+- (void)stopObserving { }
 
 RCT_EXPORT_METHOD(show:(NSString *)methodDataString
                         details:(NSDictionary *)details
@@ -221,14 +247,200 @@ RCT_EXPORT_METHOD(canMakePayments: (NSString *)methodDataString
     resolve(@([PKPaymentAuthorizationViewController canMakePayments]));
 }
 
+RCT_EXPORT_METHOD(updatePaymentItems:(NSDictionary *)details
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+    if (!self.paymentMethodCompletion) {
+        reject(@"no_completion", @"No payment method completion handler available", nil);
+        return;
+    }
+
+    NSArray<PKPaymentSummaryItem *> *items = [self getPaymentSummaryItemsFromDetails:details];
+
+    PKPaymentRequestPaymentMethodUpdate *update =
+        [[PKPaymentRequestPaymentMethodUpdate alloc] initWithPaymentSummaryItems:items];
+
+    self.paymentMethodCompletion(update);
+    self.paymentMethodCompletion = nil;
+
+    resolve(nil);
+}
+
+RCT_EXPORT_METHOD(updateShippingContact:(NSDictionary *)details
+                  shippingMethods:(NSArray<NSDictionary *> *)shippingMethods
+                  errors:(NSArray<NSDictionary *> *)errors
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+    if (!self.shippingContactCompletion) {
+        reject(@"no_completion", @"No shipping contact completion handler available", nil);
+        return;
+    }
+
+    NSArray<PKPaymentSummaryItem *> *items = [self getPaymentSummaryItemsFromDetails:details];
+    NSArray<PKShippingMethod *> *pkShippingMethods = [self getShippingMethodsFromArray:shippingMethods];
+    NSArray<NSError *> *pkErrors = [self getErrorsFromArray:errors];
+
+    PKPaymentRequestShippingContactUpdate *update =
+        [[PKPaymentRequestShippingContactUpdate alloc] initWithErrors:pkErrors
+                                                 paymentSummaryItems:items
+                                                     shippingMethods:pkShippingMethods];
+
+    self.shippingContactCompletion(update);
+    self.shippingContactCompletion = nil;
+
+    resolve(nil);
+}
+
+RCT_EXPORT_METHOD(updateShippingMethod:(NSDictionary *)details
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+    if (!self.shippingMethodCompletion) {
+        reject(@"no_completion", @"No shipping method completion handler available", nil);
+        return;
+    }
+
+    NSArray<PKPaymentSummaryItem *> *items = [self getPaymentSummaryItemsFromDetails:details];
+
+    PKPaymentRequestShippingMethodUpdate *update =
+        [[PKPaymentRequestShippingMethodUpdate alloc] initWithPaymentSummaryItems:items];
+
+    self.shippingMethodCompletion(update);
+    self.shippingMethodCompletion = nil;
+
+    resolve(nil);
+}
+
+RCT_EXPORT_METHOD(updateCouponCode:(NSDictionary *)details
+                  shippingMethods:(NSArray<NSDictionary *> *)shippingMethods
+                  errors:(NSArray<NSDictionary *> *)errors
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+    if (!self.couponCodeCompletion) {
+        reject(@"no_completion", @"No coupon code completion handler available", nil);
+        return;
+    }
+
+    NSArray<PKPaymentSummaryItem *> *items = [self getPaymentSummaryItemsFromDetails:details];
+    NSArray<PKShippingMethod *> *pkShippingMethods = [self getShippingMethodsFromArray:shippingMethods];
+    NSArray<NSError *> *pkErrors = [self getErrorsFromArray:errors];
+
+    PKPaymentRequestCouponCodeUpdate *update =
+        [[PKPaymentRequestCouponCodeUpdate alloc] initWithPaymentSummaryItems:items
+                                                              shippingMethods:pkShippingMethods
+                                                                       errors:pkErrors];
+
+    self.couponCodeCompletion(update);
+    self.couponCodeCompletion = nil;
+
+    resolve(nil);
+}
+
 // DELEGATES https://developer.apple.com/documentation/passkit/pkpaymentauthorizationviewcontrollerdelegate?language=objc
 
 // https://developer.apple.com/documentation/passkit/pkpaymentauthorizationviewcontrollerdelegate/1616180-paymentauthorizationviewcontroll?language=objc
 - (void) paymentAuthorizationViewControllerDidFinish:(PKPaymentAuthorizationViewController *)controller
 {
+    self.paymentMethodCompletion = nil;
+    self.shippingContactCompletion = nil;
+    self.shippingMethodCompletion = nil;
+    self.couponCodeCompletion = nil;
     [controller dismissViewControllerAnimated:YES completion:^{
         [self rejectPromise:@"payment_error" message:@"Payment process canceled by user." error:nil];
     }];
+}
+
+// https://developer.apple.com/documentation/passkit/pkpaymentauthorizationviewcontrollerdelegate/2865749-paymentauthorizationviewcontroll?language=objc
+- (void) paymentAuthorizationViewController:(PKPaymentAuthorizationViewController *)controller
+                   didSelectShippingContact:(PKContact *)contact
+                                    handler:(void (^)(PKPaymentRequestShippingContactUpdate * _Nonnull))completion
+{
+    self.shippingContactCompletion = completion;
+
+    NSMutableDictionary *contactDict = [NSMutableDictionary dictionary];
+
+    contactDict[@"emailAddress"] = contact.emailAddress ?: @"";
+
+    CNPhoneNumber *phoneNumber = contact.phoneNumber;
+    NSMutableDictionary *phoneNumberDict = [NSMutableDictionary dictionary];
+    phoneNumberDict[@"stringValue"] = phoneNumber.stringValue ?: @"";
+    contactDict[@"phoneNumber"] = phoneNumberDict;
+
+    CNPostalAddress *postalAddress = contact.postalAddress;
+    NSMutableDictionary *postalAddressDict = [NSMutableDictionary dictionary];
+    if (postalAddress) {
+        postalAddressDict[@"street"] = postalAddress.street ?: @"";
+        postalAddressDict[@"city"] = postalAddress.city ?: @"";
+        postalAddressDict[@"state"] = postalAddress.state ?: @"";
+        postalAddressDict[@"postalCode"] = postalAddress.postalCode ?: @"";
+        postalAddressDict[@"country"] = postalAddress.country ?: @"";
+        postalAddressDict[@"ISOCountryCode"] = postalAddress.ISOCountryCode ?: @"";
+        postalAddressDict[@"subAdministrativeArea"] = postalAddress.subAdministrativeArea ?: @"";
+        postalAddressDict[@"subLocality"] = postalAddress.subLocality ?: @"";
+    }
+    contactDict[@"postalAddress"] = postalAddressDict;
+
+    NSPersonNameComponents *nameComponents = contact.name;
+    NSMutableDictionary *nameDict = [NSMutableDictionary dictionary];
+    if (nameComponents) {
+        nameDict[@"givenName"] = nameComponents.givenName ?: @"";
+        nameDict[@"familyName"] = nameComponents.familyName ?: @"";
+        nameDict[@"middleName"] = nameComponents.middleName ?: @"";
+        nameDict[@"namePrefix"] = nameComponents.namePrefix ?: @"";
+        nameDict[@"nameSuffix"] = nameComponents.nameSuffix ?: @"";
+        nameDict[@"nickname"] = nameComponents.nickname ?: @"";
+    }
+    contactDict[@"name"] = nameDict;
+
+    [self sendEventWithName:@"onShippingContactChange" body:contactDict];
+}
+
+// https://developer.apple.com/documentation/passkit/pkpaymentauthorizationviewcontrollerdelegate/1616199-paymentauthorizationviewcontroll?language=objc
+- (void) paymentAuthorizationViewController:(PKPaymentAuthorizationViewController *)controller
+                    didSelectShippingMethod:(PKShippingMethod *)shippingMethod
+                                    handler:(void (^)(PKPaymentRequestShippingMethodUpdate * _Nonnull))completion
+{
+    self.shippingMethodCompletion = completion;
+
+    NSDictionary *methodInfo = @{
+        @"identifier": shippingMethod.identifier ?: @"",
+        @"detail": shippingMethod.detail ?: @""
+    };
+
+    [self sendEventWithName:@"onShippingMethodChange" body:methodInfo];
+}
+
+// https://developer.apple.com/documentation/passkit/pkpaymentauthorizationviewcontrollerdelegate/3567281-paymentauthorizationviewcontroll?language=objc
+- (void) paymentAuthorizationViewController:(PKPaymentAuthorizationViewController *)controller
+                      didSelectCouponCode:(NSString *)couponCode
+                                    handler:(void (^)(PKPaymentRequestCouponCodeUpdate * _Nonnull))completion
+{
+    self.couponCodeCompletion = completion;
+
+    NSDictionary *couponInfo = @{
+        @"couponCode": couponCode ?: @""
+    };
+
+    [self sendEventWithName:@"onCouponCodeChange" body:couponInfo];
+}
+
+// https://developer.apple.com/documentation/passkit/pkpaymentauthorizationviewcontrollerdelegate/1616203-paymentauthorizationviewcontroll?language=objc
+- (void) paymentAuthorizationViewController:(PKPaymentAuthorizationViewController *)controller
+                    didSelectPaymentMethod:(PKPaymentMethod *)paymentMethod
+                                   handler:(void (^)(PKPaymentRequestPaymentMethodUpdate * _Nonnull))completion
+{
+    self.paymentMethodCompletion = completion;
+
+    NSDictionary *methodInfo = @{
+        @"type": [self stringFromPaymentMethodType:paymentMethod.type],
+        @"network": paymentMethod.network ?: @"",
+        @"displayName": paymentMethod.displayName ?: @""
+    };
+
+    [self sendEventWithName:@"onPaymentMethodChange" body:methodInfo];
 }
 
 // https://developer.apple.com/documentation/passkit/pkpaymentauthorizationviewcontrollerdelegate/2865759-paymentauthorizationviewcontroll?language=objc
@@ -268,7 +480,13 @@ RCT_EXPORT_METHOD(canMakePayments: (NSString *)methodDataString
             postalAddressDict[@"state"] = postalAddress.state;
             postalAddressDict[@"postalCode"] = postalAddress.postalCode;
             postalAddressDict[@"country"] = postalAddress.country;
-            postalAddressDict[@"ISOCountryCode"] = postalAddress.ISOCountryCode;
+        }
+
+        NSPersonNameComponents *billingName = billingContact.name;
+        if (billingName) {
+            postalAddressDict[@"givenName"] = billingName.givenName;
+            postalAddressDict[@"familyName"] = billingName.familyName;
+            postalAddressDict[@"middleName"] = billingName.middleName;
         }
 
         billingContactDict[@"postalAddress"] = postalAddressDict;
@@ -357,6 +575,52 @@ RCT_EXPORT_METHOD(canMakePayments: (NSString *)methodDataString
     return paymentSummaryItems;
 }
 
+- (NSArray<PKShippingMethod *> *_Nonnull)getShippingMethodsFromArray:(NSArray<NSDictionary *> *_Nullable)methods
+{
+    if (!methods || methods.count == 0) {
+        return @[];
+    }
+
+    NSMutableArray<PKShippingMethod *> *shippingMethods = [NSMutableArray array];
+    for (NSDictionary *methodDict in methods) {
+        NSString *identifier = methodDict[@"identifier"];
+        NSString *detail = methodDict[@"detail"];
+
+        PKShippingMethod *method = [[PKShippingMethod alloc] init];
+        method.identifier = identifier ?: @"";
+        method.detail = detail ?: @"";
+
+        [shippingMethods addObject:method];
+    }
+
+    return shippingMethods;
+}
+
+- (NSArray<NSError *> *_Nonnull)getErrorsFromArray:(NSArray<NSDictionary *> *_Nullable)errors
+{
+    if (!errors || errors.count == 0) {
+        return @[];
+    }
+
+    NSMutableArray<NSError *> *nativeErrors = [NSMutableArray array];
+    for (NSDictionary *errorDict in errors) {
+        NSString *code = errorDict[@"code"] ?: @"unknown";
+        NSString *message = errorDict[@"message"] ?: @"";
+
+        NSError *error =
+            [NSError errorWithDomain:@"RNPayments"
+                                code:0
+                            userInfo:@{
+                                NSLocalizedDescriptionKey: message,
+                                @"code": code
+                            }];
+
+        [nativeErrors addObject:error];
+    }
+
+    return nativeErrors;
+}
+
 - (PKPaymentNetwork)paymentNetworkFromString:(NSString *)paymentNetworkString {
     static NSDictionary<NSString *, PKPaymentNetwork> *paymentNetworks;
     static dispatch_once_t onceToken;
@@ -387,7 +651,7 @@ RCT_EXPORT_METHOD(canMakePayments: (NSString *)methodDataString
             // Dynamically get PKPaymentNetworkBancontact to avoid linking issues
             Class pkPaymentNetworkClass = NSClassFromString(@"PKPaymentNetwork");
             if (pkPaymentNetworkClass) {
-                id bancontactNetwork = [pkPaymentNetworkClass performSelector:@selector(Bancontact)];
+                id bancontactNetwork = RNPayments_PKPaymentNetworkFromClassMethod(pkPaymentNetworkClass, @"Bancontact");
                 if (bancontactNetwork) {
                     mutablePaymentNetworks[@"PKPaymentNetworkBancontact"] = bancontactNetwork;
                 }
@@ -400,7 +664,7 @@ RCT_EXPORT_METHOD(canMakePayments: (NSString *)methodDataString
             // Dynamically get PKPaymentNetworkDankort to avoid linking issues on iOS 15.1
             Class pkPaymentNetworkClass = NSClassFromString(@"PKPaymentNetwork");
             if (pkPaymentNetworkClass) {
-                id dankortNetwork = [pkPaymentNetworkClass performSelector:@selector(Dankort)];
+                id dankortNetwork = RNPayments_PKPaymentNetworkFromClassMethod(pkPaymentNetworkClass, @"Dankort");
                 if (dankortNetwork) {
                     mutablePaymentNetworks[@"PKPaymentNetworkDankort"] = dankortNetwork;
                 }
@@ -414,7 +678,7 @@ RCT_EXPORT_METHOD(canMakePayments: (NSString *)methodDataString
             // Dynamically get PKPaymentNetworkMir to avoid linking issues
             Class pkPaymentNetworkClass = NSClassFromString(@"PKPaymentNetwork");
             if (pkPaymentNetworkClass) {
-                id mirNetwork = [pkPaymentNetworkClass performSelector:@selector(Mir)];
+                id mirNetwork = RNPayments_PKPaymentNetworkFromClassMethod(pkPaymentNetworkClass, @"Mir");
                 if (mirNetwork) {
                     mutablePaymentNetworks[@"PKPaymentNetworkMIR"] = mirNetwork;
                 }

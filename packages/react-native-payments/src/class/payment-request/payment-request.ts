@@ -1,5 +1,5 @@
 /* eslint-disable max-lines */
-import { Platform } from 'react-native';
+import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import uuid from 'react-native-uuid';
 
 import { emptyFn, isDefined, isNotEmptyArray, isNotEmptyString } from '@rnw-community/shared';
@@ -29,8 +29,22 @@ import type { AndroidPaymentMethodDataDataInterface } from '../../@standard/andr
 import type { AndroidPaymentDataRequest } from '../../@standard/android/request/android-payment-data-request';
 import type { IosPaymentMethodDataDataInterface } from '../../@standard/ios/mapping/ios-payment-method-data-data.interface';
 import type { IosPaymentDataRequest } from '../../@standard/ios/request/ios-payment-data-request';
+import type { IosPKContact } from '../../@standard/ios/response/ios-pk-contact';
+import type { IosPKShippingMethod } from '../../@standard/ios/response/ios-pk-shipping-method';
 import type { PaymentDetailsInit } from '../../@standard/w3c/payment-details-init';
 import type { PaymentMethodData } from '../../@standard/w3c/payment-method-data';
+import type { PaymentRequestUpdateResult } from '../../type/payment-request-update-result/payment-request-update-result.type';
+import type { EmitterSubscription, NativeModule } from 'react-native';
+
+export interface PaymentMethodChangeEvent {
+    type: string;
+    network: string;
+    displayName: string;
+}
+
+export interface CouponCodeChangeEvent {
+    couponCode: string;
+}
 
 /*
  * HINT: Troubleshooting: https://developers.google.com/pay/api/android/support/troubleshooting
@@ -47,6 +61,18 @@ export class PaymentRequest {
     private readonly platformMethodData: AndroidPaymentMethodDataDataInterface | IosPaymentMethodDataDataInterface;
 
     private acceptPromiseRejecter: (reason: unknown) => void = emptyFn;
+
+    private paymentMethodChangeSubscription: EmitterSubscription | null = null;
+    private paymentMethodChangeCallback: ((event: PaymentMethodChangeEvent) => PaymentDetailsInit) | null = null;
+
+    private shippingContactChangeSubscription: EmitterSubscription | null = null;
+    private shippingContactChangeCallback: ((event: IosPKContact) => PaymentRequestUpdateResult) | null = null;
+
+    private shippingMethodChangeSubscription: EmitterSubscription | null = null;
+    private shippingMethodChangeCallback: ((event: IosPKShippingMethod) => PaymentRequestUpdateResult) | null = null;
+
+    private couponCodeChangeSubscription: EmitterSubscription | null = null;
+    private couponCodeChangeCallback: ((event: CouponCodeChangeEvent) => PaymentRequestUpdateResult) | null = null;
 
      
     constructor(
@@ -109,12 +135,16 @@ export class PaymentRequest {
 
                 NativePayments.show(this.serializedMethodData, details)
                     .then(jsonDetails => {
+                        this.cleanupListeners();
                         resolve(this.handleAccept(jsonDetails));
 
                         return void 0;
                     })
-                     
-                    .catch(reject);
+
+                    .catch((error: unknown) => {
+                        this.cleanupListeners();
+                        reject(error instanceof Error ? error : new Error(String(error)));
+                    });
             } else {
                 reject(new DOMException(PaymentsErrorEnum.InvalidStateError));
             }
@@ -134,6 +164,139 @@ export class PaymentRequest {
         this.state = 'closed';
 
         this.acceptPromiseRejecter(new DOMException(PaymentsErrorEnum.AbortError));
+    }
+
+    // Register a callback for Apple Pay payment method changes (credit/debit selection)
+    onPaymentMethodChange(
+        callback: (event: PaymentMethodChangeEvent) => PaymentDetailsInit
+    ): void {
+        this.paymentMethodChangeCallback = callback;
+
+        if (Platform.OS !== 'ios') {
+            return;
+        }
+
+        const eventEmitter = this.getPaymentsEventEmitter();
+        this.paymentMethodChangeSubscription = eventEmitter.addListener(
+            'onPaymentMethodChange',
+            (event: PaymentMethodChangeEvent) => {
+                if (!this.paymentMethodChangeCallback) {
+                    return;
+                }
+
+                const updatedDetails = this.paymentMethodChangeCallback(event);
+                this.details = updatedDetails;
+                NativePayments.updatePaymentItems(updatedDetails).catch(emptyFn);
+            }
+        );
+    }
+
+    onShippingContactChange(callback: (event: IosPKContact) => PaymentRequestUpdateResult): void {
+        this.shippingContactChangeCallback = callback;
+
+        if (Platform.OS !== 'ios') {
+            return;
+        }
+
+        const eventEmitter = this.getPaymentsEventEmitter();
+        this.shippingContactChangeSubscription = eventEmitter.addListener(
+            'onShippingContactChange',
+            (event: IosPKContact) => {
+                if (!this.shippingContactChangeCallback) {
+                    return;
+                }
+
+                const result = this.shippingContactChangeCallback(event);
+                this.details = result.details;
+
+                NativePayments.updateShippingContact(
+                    result.details,
+                    result.shippingMethods ?? [],
+                    result.errors ?? []
+                ).catch(emptyFn);
+            }
+        );
+    }
+
+    onShippingMethodChange(callback: (event: IosPKShippingMethod) => PaymentRequestUpdateResult): void {
+        this.shippingMethodChangeCallback = callback;
+
+        if (Platform.OS !== 'ios') {
+            return;
+        }
+
+        const eventEmitter = this.getPaymentsEventEmitter();
+        this.shippingMethodChangeSubscription = eventEmitter.addListener(
+            'onShippingMethodChange',
+            (event: IosPKShippingMethod) => {
+                if (!this.shippingMethodChangeCallback) {
+                    return;
+                }
+
+                const result = this.shippingMethodChangeCallback(event);
+                this.details = result.details;
+                NativePayments.updateShippingMethod(result.details).catch(emptyFn);
+            }
+        );
+    }
+
+    onCouponCodeChange(callback: (event: CouponCodeChangeEvent) => PaymentRequestUpdateResult): void {
+        this.couponCodeChangeCallback = callback;
+
+        if (Platform.OS !== 'ios') {
+            return;
+        }
+
+        const eventEmitter = this.getPaymentsEventEmitter();
+        this.couponCodeChangeSubscription = eventEmitter.addListener(
+            'onCouponCodeChange',
+            (event: CouponCodeChangeEvent) => {
+                if (!this.couponCodeChangeCallback) {
+                    return;
+                }
+
+                const result = this.couponCodeChangeCallback(event);
+                this.details = result.details;
+
+                NativePayments.updateCouponCode(
+                    result.details,
+                    result.shippingMethods ?? [],
+                    result.errors ?? []
+                ).catch(emptyFn);
+            }
+        );
+    }
+
+    private getPaymentsNativeModule(): NativeModule | undefined {
+        const modules = NativeModules as unknown as { Payments?: NativeModule };
+
+        return modules.Payments;
+    }
+
+    private getPaymentsEventEmitter(): NativeEventEmitter {
+        return new NativeEventEmitter(this.getPaymentsNativeModule());
+    }
+
+    private cleanupSubscription(subscription: EmitterSubscription | null): null {
+        if (subscription) {
+            subscription.remove();
+        }
+
+        return null;
+    }
+
+    private cleanupListeners(): void {
+        this.paymentMethodChangeSubscription = this.cleanupSubscription(this.paymentMethodChangeSubscription);
+        this.paymentMethodChangeCallback = null;
+
+        this.shippingContactChangeSubscription = this.cleanupSubscription(this.shippingContactChangeSubscription);
+        this.shippingContactChangeCallback = null;
+
+        this.shippingMethodChangeSubscription = this.cleanupSubscription(this.shippingMethodChangeSubscription);
+        this.shippingMethodChangeCallback = null;
+
+        this.couponCodeChangeSubscription = this.cleanupSubscription(this.couponCodeChangeSubscription);
+        this.couponCodeChangeCallback = null;
     }
 
     private handleAccept(details: string): AndroidPaymentResponse | IosPaymentResponse {

@@ -2,16 +2,17 @@
 #import <PassKit/PassKit.h>
 
 #import <React/RCTUtils.h>
+#import <React/RCTEventEmitter.h>
 
 #ifdef RCT_NEW_ARCH_ENABLED
 #import "RNPaymentsSpec.h"
 
-@interface Payments : NSObject<NativePaymentsSpec, PKPaymentAuthorizationViewControllerDelegate>
+@interface Payments : RCTEventEmitter<NativePaymentsSpec, PKPaymentAuthorizationViewControllerDelegate>
 
 #else
 
 #import <React/RCTBridgeModule.h>
-@interface Payments : NSObject<RCTBridgeModule, PKPaymentAuthorizationViewControllerDelegate>
+@interface Payments : RCTEventEmitter<RCTBridgeModule, PKPaymentAuthorizationViewControllerDelegate>
 
 #endif
 
@@ -19,5 +20,9 @@
 @property (nonatomic, copy) void (^__strong _Nonnull completion)(PKPaymentAuthorizationResult * _Nonnull __strong);
 @property (nonatomic, copy) RCTPromiseResolveBlock _Nullable paymentResolve;
 @property (nonatomic, copy) RCTPromiseRejectBlock _Nullable paymentReject;
+@property (nonatomic, copy, nullable) void (^paymentMethodCompletion)(PKPaymentRequestPaymentMethodUpdate * _Nonnull);
+@property (nonatomic, copy, nullable) void (^shippingContactCompletion)(PKPaymentRequestShippingContactUpdate * _Nonnull);
+@property (nonatomic, copy, nullable) void (^shippingMethodCompletion)(PKPaymentRequestShippingMethodUpdate * _Nonnull);
+@property (nonatomic, copy, nullable) void (^couponCodeCompletion)(PKPaymentRequestCouponCodeUpdate * _Nonnull);
 
 @end
